@@ -1,0 +1,51 @@
+---
+title: "Introduction to fullMatrix"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Introduction to fullMatrix}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+library(fullMatrix)
+```
+
+**Overview**
+
+The fullMatrix package helps convert a 10X Genomics-style sparse matrix into a dense matrix in data.table format, which is easier to manipulate for downstream analysis in R.
+
+This vignette walks through how to use the main function read_full_matrix().
+
+**Example Data**
+
+Let’s assume you have the following files from a typical 10X dataset:
+
+matrix.mtx.gz — the count matrix in Matrix Market format
+
+features.tsv.gz — a list of gene IDs (rows)
+
+barcodes.tsv.gz — a list of cell barcodes (columns)
+
+```{r}
+library(Matrix)
+library(data.table)
+
+matrix_file <- "matrix.mtx.gz"
+features_file <- "features.tsv.gz"
+barcodes_file <- "barcodes.tsv.gz"
+
+```
+
+## Read the Data
+
+Use the main function `read_full_matrix()` to convert your files into a usable data.table:
+
+```{}
+{r, eval = FALSE}
+dt <- read_full_matrix("matrix.mtx.gz", "features.tsv.gz", "barcodes.tsv.gz")
+
+dt[1:5,1:5]
+
+```
