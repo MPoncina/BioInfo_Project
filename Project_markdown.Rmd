@@ -1,0 +1,322 @@
+---
+title: "PBMC project"
+author: "Matteo"
+date: "2025-06-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# PART 1
+
+I created a docker by running the terminal in the same folder as my dockerfile. In Dockerfile I punt:
+
+FROM ubuntu:latest
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y\
+curl\
+vim\
+&& rm -rf /var/lib/apt/lists/\*
+
+CMD ["bash"]
+
+Then from the terminal:
+
+docker build -t my-ubuntu-image .
+
+docker run -it my-ubuntu-image
+
+# PART 2
+
+I realized I needed R installed so since it took me too long to install it last time from the ubuntu base image I figured I should pull one with R already installed so:
+
+docker pull r-base:latest
+
+docker run -it --rm r-base:latest R
+
+In this way I could use R inside docker to try installing Seurat and Signac. I tried to install Seurat after apt-get-update and apt-get-install to install dependencies but it was taking too long and it wouldn't end (waited more than 20min) so again I decided to pull a docker with already Seurat installed. From there I tried to install signac from github. I tried remotes::install_github("timoast/signac") but had Warning messages: 1: In install.packages("Signac") : installation of package ‘SeuratObject’ had non-zero exit status 2: In install.packages("Signac") : installation of package ‘Signac’ had non-zero exit status. I realized I was missing some dependencies so before I installed other packages from Bioconductor like Granges, Matrix and other but when the prompt was asking to update I put Yes and then waited more than 10min and then retried.
+
+# PART 3
+
+## Step 1: Matrix conversion
+
+*• Use the Matrix R package to convert the sparse matrix into a full matrix.*
+
+*• Save the result as a data.table object.*
+
+Loading necessary libraries
+
+```{r}
+library(Seurat)
+library(Signac)
+library(Matrix)
+library(data.table)
+library(GenomicRanges)
+library(ggplot2)
+library(rtracklayer)
+library(dplyr)
+```
+
+Loading and reading files to create the full matrix
+
+```{r}
+matrix_file <- "matrix.mtx.gz"
+features_file <- "features.tsv.gz"
+barcodes_file <- "barcodes.tsv.gz"
+sparse_mat <- readMM(matrix_file)
+features <- fread(features_file, header = FALSE)
+barcodes <- fread(barcodes_file, header = FALSE)
+```
+
+Creating the matrix by using features ENSG gene ID as rows and barcodes as columns. Creating the data table and saving it locally as full_matrix.tsv
+
+```{r}
+rownames(sparse_mat) <- features$V1
+colnames(sparse_mat) <- barcodes$V1
+full_mat <- as.matrix(sparse_mat)
+dt_matrix <- as.data.table(full_mat, keep.rownames = "Gene")
+#write.table(dt_matrix, "full_matrix.tsv", sep = "\t", row.names = TRUE) if want to save
+```
+
+## Step 2: Split gene expression and ATAC-seq data
+
+*• From the data.table object, separate: o Gene expression data (rows labelled with Ensembl gene IDs, e.g., ENSG00000243485) o ATAC-seq peak data (rows labelled with genomic coordinates, e.g., chrN:NNNN-NNNN)*
+
+Separating gene expression and ATAC with grepl. For gene expression I take all the rows with ENSG, while for ATAC I take all the rows which contain chr and numbers. I realized that the sum of gene expression and ATAC was not equal to the total number of rows so I modified grep for ATAC so that I take also the rows with other identifiers (scaffold)
+
+```{r}
+gene_expression_dt <- dt_matrix[grepl("^ENSG", Gene)]
+atac_peak_dt <- dt_matrix[grepl("^chr[0-9XYM]+:\\d+-\\d+", Gene)]
+# missing some rows to reach 117757
+# Rows not in genes or peaks
+missing_rows <- dt_matrix[!grepl("^ENSG", Gene) & !grepl("^chr[0-9XYM]+:\\d+-\\d+", Gene)]
+missing_rows[, Gene] # Check what these missing features are
+#If I want to include the missing rows (not referred to standard chromosome):
+#atac_peak_dt <- dt_matrix[grepl("^[A-Za-z0-9._]+:\\d+-\\d+", Gene)]
+
+```
+
+## Step 3: Summarize data
+
+*• For each dataset (expression and peaks), compute the column-wise sum to produce: o A single vector of total expression per gene o A single vector of total chromatin accessibility per peak region*
+
+As genes are rows, I sums the rows of my gene_expression_dt except the first one (which containes the barcodes). Same for accessibility. I also attach the names of the genes to the vector components.
+
+```{r}
+# Total expression per gene
+total_expression <- rowSums(gene_expression_dt[, -1, with = FALSE])
+# Total chromatin accessibility per peak region
+total_accessibility <- rowSums(atac_peak_dt[, -1, with = FALSE])
+# Attach names
+names(total_expression) <- gene_expression_dt$Gene
+names(total_accessibility) <- atac_peak_dt$Gene
+```
+
+## Step 4: Create Genomic Ranges
+
+*• Convert both the summarized gene expression and peak data into GenomicRanges objects. • Add the summarized data as metadata to their respective GenomicRanges.*
+
+To create the GRanges object for the peak data I created peak_features which contain all the information of the genes where the third column is peaks (the ATAC peaks). In this way, I already had start and ending position in the features columns. I couldn't save the result locally because it was taking too much time (do not know why). I added total_accessibility vector as a metadata.
+
+I have done the same for gene expression, but the GRanges was giving me an error because some columns of the features where NA so I added it and then created the ranges. I also added Gene ID, symbol and total_expression as metadata.
+
+```{r}
+peak_features <- features[grepl("^chr[0-9XYM]+:\\d+-\\d+", features$V1)]
+# Create GRanges object for accessibility
+peak_gr <- GRanges(
+  seqnames = peak_features$V4,
+  ranges = IRanges(start = as.numeric(peak_features$V5),
+                   end = as.numeric(peak_features$V6)),
+  accessibility = total_accessibility
+)
+peak_gr
+#saveRDS(peak_gr, "peak_gr.rds") takes too long!
+
+gene_features <- features[features$V3 == "Gene Expression"]
+#add "chr" because I have some NA in V4
+gene_features$V4 <- as.character(gene_features$V4)
+gene_features$V4 <- ifelse(grepl("^chr", gene_features$V4),
+                           gene_features$V4, paste0("chr", gene_features$V4))
+# Create GRanges object for gene expression
+gene_gr <- GRanges(
+  seqnames = gene_features$V4,
+  ranges = IRanges(start = as.numeric(gene_features$V5),
+                   end = as.numeric(gene_features$V6)),
+  strand = "*",
+  gene_id = gene_features$V1,
+  gene_symbol = gene_features$V2,
+  expression = total_expression
+)
+gene_gr
+#saveRDS(gene_gr, "gene_gr.rds") too long!
+```
+
+## Step 5: Gene annotation for ATACsep data
+
+*• Using the annotation file Homo_sapiens.GRCh38.114.gtf.gz: o Create a GenomicRanges object only for protein-coding genes and only for gene features.*
+
+*o Remap the ATAC-seq GenomicRanges to this object and attach the summarized peak data from step 4.*
+
+I imported the gtf files and then took only the protein coding genes from gene_biotype column. Next, to find overlaps, I added "chr" in the seqlevels of gtf protein coding genes because otherwise it was not comparable with my peak_gr. I understood that my ATAC seq peak (peak_gr) need to be mapped to understand which gene they are referred to. So I took the indexes and created a data.table with peaks and genes info. Finally I sum the overlapping gene ID to obtain peak_summary.
+
+```{r}
+gtf <- import("Homo_sapiens.GRCh38.114.gtf.gz")
+gtf_genes <- gtf[gtf$type == "gene" & gtf$gene_biotype == "protein_coding"]
+# Find overlaps
+#missing the name chr on gtf so I need to add it
+seqlevels(gtf_genes) <- paste0("chr", seqlevels(gtf_genes))
+
+#I use my peak_gr as query to gtf_genes
+overlaps <- findOverlaps(peak_gr, gtf_genes)
+
+# Get indices to extract which peak overlaps which gene:
+peak_idx <- queryHits(overlaps)
+gene_idx <- subjectHits(overlaps)
+# Create a data.table with gene and peak info
+dt_gene_peak <- data.table(
+  gene_id = gtf_genes$gene_id[gene_idx],
+  accessibility = mcols(peak_gr)$accessibility[peak_idx]
+)
+# Sum accessibility per gene
+peak_summary <- dt_gene_peak[, .(total_peak_accessibility = sum(accessibility)), by = gene_id]
+peak_summary
+#fwrite(peak_summary, file = "peak_summary.csv")
+
+# Match peak_summary to gtf_genes by gene_id
+match_idx <- match(gtf_genes$gene_id, peak_summary$gene_id)
+# Create a new metadata column
+mcols(gtf_genes)$total_peak_accessibility <- peak_summary$total_peak_accessibility[match_idx]
+# Optional: set NA to 0 for genes with no overlapping peaks
+mcols(gtf_genes)$total_peak_accessibility[is.na(mcols(gtf_genes)$total_peak_accessibility)] <- 0
+summary(gtf_genes)
+```
+
+## Step 6: Finalize expression data
+
+*• Subset the expression GenomicRanges, step 4, to include only protein-coding genes.*
+
+*• Add gene symbol identifiers to the object.*
+
+gtf_genes contains only the protein coding so I create protein_coding_ids with the gene_id column from gtf_genes. Now I create gene_gr_pc (GRanges from gene_gr subsetted for protein coding), taking only the gene id which are in protein_coding_ids. To add the gene_id and symbol I used a lookup table to match symbol and id.
+
+```{r}
+protein_coding_ids <- gtf_genes$gene_id
+# Keep only entries in gene_gr whose gene_id is protein-coding
+gene_gr_pc <- gene_gr[mcols(gene_gr)$gene_id %in% protein_coding_ids]
+# Create a lookup table from GTF: gene_id -> gene_name
+gtf_lookup <- data.table(
+  gene_id = gtf_genes$gene_id,
+  gene_symbol = gtf_genes$gene_name
+)
+# Match by gene_id
+lookup_idx <- match(mcols(gene_gr_pc)$gene_id, gtf_lookup$gene_id)
+# Add gene symbols to metadata
+mcols(gene_gr_pc)$gene_symbol <- gtf_lookup$gene_symbol[lookup_idx]
+gene_gr_pc
+```
+
+## Step 7: Data normalization and Integration
+
+*• Normalize both expression and ATAC-seq data using CPM: o Divide each column by the column sum, multiply by 10\^6, add a pseudo-count of 1, and apply log2. • Merge expression and ATAC data based on common genes. • Provide a summary table of the number of ATAC peaks that could not be merged and a plot of peak intensity distribution chromosome by chromosome. Provide a summary table of the genes which do not show association with ATAC peaks and plot their expression distribution chromosome by chromosome*
+
+This is where I started to get a bit confused. I need to restart from the original gene_expression_dt and atac_peak_dt to normalize the counts. So I created a new matrix by removing the first column containing gene id and then applied the normalization, to obtain exp_cpm and atac_cpm. Next, I created two data tables from this normalized count in order to merge. The first table, for the expression, contains gene_id, expression and seqnames from gene_gr_pc. The second one, for the atac peak, contains gene_id and atac cpm from gtf_genes. I am not sure these are the correct one but this way I can merge them to create merged_dt, which will be useful later to make plots.
+
+From peak_gr I could already made a plot of the accessibility for chromosomes.
+
+As I need to provide a summary table of the number of peaks that could not be merged I used unique and setdiff to find them and then created the unmerged_summary that i also plotted.
+
+```{r}
+# Extract matrix: assume gene_expression_dt includes genes as rows, samples as columns
+expr_mat <- as.matrix(gene_expression_dt[, -1, with = FALSE])  # remove gene ID column
+# CPM normalization
+expr_cpm <- log2((t(t(expr_mat) / colSums(expr_mat)) * 1e6) + 1)
+# Assume atac_peak_dt is similar: peaks as rows, columns as cells/samples
+atac_mat <- as.matrix(atac_peak_dt[, -1, with = FALSE])
+# CPM normalization
+atac_cpm <- log2((t(t(atac_mat) / colSums(atac_mat)) * 1e6) + 1)
+
+# Create data.table for merging
+expr_dt <- data.table(
+  gene_id = mcols(gene_gr_pc)$gene_id,
+  expr_cpm = mcols(gene_gr_pc)$expression,
+  chr = as.character(seqnames(gene_gr_pc))
+)
+
+atac_dt <- data.table(
+  gene_id = gtf_genes$gene_id,
+  atac_cpm = mcols(gtf_genes)$total_peak_accessibility
+)
+
+# Merge by gene_id
+merged_dt <- merge(expr_dt, atac_dt, by = "gene_id",all=TRUE)
+
+#from the peak gr I can already create total peaks (accessibility) per chromosomes
+peak_dt <- as.data.table(peak_gr)
+peak_dt[, accessibility := mcols(peak_gr)$accessibility]
+peak_dt[, chr := as.character(seqnames)]
+# Boxplot of total accessibility per chromosome from atac
+p <- ggplot(peak_dt, aes(x = chr, y = accessibility)) +
+  geom_boxplot(outlier.shape = NA, fill = "lightblue") +
+  coord_cartesian(ylim = quantile(peak_dt$accessibility, c(0.05, 0.95), na.rm = TRUE)) +
+  theme_minimal() +
+  labs(title = "ATAC Peak Accessibility per Chromosome",
+       x = "Chromosome", y = "Accessibility Score") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p
+
+#provide a summary table of the number of peaks that could not be merged
+used_peak_ids <- unique(queryHits(overlaps))
+unmerged_peak_ids <- setdiff(seq_along(peak_gr), used_peak_ids)
+unmerged_peaks_dt <- as.data.table(peak_gr[unmerged_peak_ids])
+unmerged_summary <- unmerged_peaks_dt[, .N, by = seqnames]
+unmerged_summary
+#fwrite(unmerged_summary, "unmerged_summary.tsv")
+p1<-ggplot(unmerged_summary, aes(x = seqnames, y = N)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    theme_minimal() +
+    labs(title = "Unmerged ATAC Peaks per Chromosome", x = "Chromosome", y = "Count")
+p1 #there are also all the other non chromosome which I took from peaks
+#ggsave("unmerged_peaks.png", plot = p1, width = 10, height = 8, dpi = 300, bg = "white") to save the plot
+```
+
+## Step 8: Visualization
+
+*• Generate a scatter plot using ggplot2: o X-axis: log-transformed expression CPM o Y-axis: log-transformed ATAC CPM • If the plot is too much busy of data divide the plot in the 24 chromosomes*
+
+From the merged_dt containing atac and expression CPM transformed I applied the log2 transformation and then used ggplot with points. As it was too crowded I filtered for chr1-22 or chrX,Y creating the new data.table merged_dt_chr. Saved the final plot p3 locally in the folder.
+
+```{r}
+#LOG2 transform
+merged_dt[, expr_log := log2(expr_cpm + 1)]
+merged_dt[, atac_log := log2(atac_cpm + 1)]
+p2 <- ggplot(merged_dt, aes(x = expr_log, y = atac_log)) +
+  geom_point(alpha = 0.3, color = "steelblue", size = 1) +
+  theme_minimal() +
+  labs(title = "Expression vs ATAC Accessibility",
+       x = "log2(CPM Expression + 1)",
+       y = "log2(CPM ATAC + 1)")
+p2 #crowded plot to split in chromosome
+
+# Filter to 24 chromosomes only
+merged_dt_chr <- merged_dt[chr %in% paste0("chr", c(1:22, "X", "Y"))]
+# Order chromosomes
+merged_dt_chr[, chr := factor(chr, levels = paste0("chr", c(1:22, "X", "Y")))]
+
+# Plot splitted chr
+p3<-ggplot(merged_dt_chr, aes(x = expr_log, y = atac_log)) +
+  geom_point(alpha = 0.3, color = "steelblue", size = 0.8) +
+  theme_minimal() +
+  facet_wrap(~chr, scales = "free") +
+  labs(title = "Expression vs ATAC by Chromosome",
+       x = "log2(CPM Expression + 1)",
+       y = "log2(CPM ATAC + 1)")
+p3
+#ggsave("expression_vs_atac_by_chr.png", plot = p3, width = 10, height = 8, dpi = 300, bg = "white") if want to save
+
+```
+
+# PART 4
