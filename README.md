@@ -2,6 +2,8 @@
 
 This file contains informations about the Project for the exam Programming Approaches for Bioinformatics. AY 2025, Matteo Poncina
 
+Input files are matrix, features and barcodes file + a genome reference (GRCh38). From these, the code performes the steps indicated in the exam file.
+
 ## Getting Started
 
 Follow these steps to set up the project and run the analysis.
