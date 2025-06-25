@@ -33,3 +33,6 @@ Final_project.R: the entire R script used to perform analysis and create plots.
 
 Project_markdown.html: The main R Markdown script used to perform the analysis and generate the report.
 
+## Important note
+
+I could not test the analysis as the execution was halted due to limited RAM memory in allocating the matrix vector with 2.6 Gb size. So I can't be sure it works.
