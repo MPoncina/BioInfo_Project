@@ -24,6 +24,7 @@ Rscript Final_project.R
 
 ### Files included
 fullMatrix: an R package to perform the first step of the analysis, which is to build the full Matrix starting from barcodes, features and matrix files. Vignette is included.
+
 Dockerfile: The configuration to build the Docker image with the necessary software and libraries.
 Final_project.R: the entire R script used to perform analysis and create plots.
 Project_markdown.html: The main R Markdown script used to perform the analysis and generate the report.
